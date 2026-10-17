@@ -1,0 +1,243 @@
+import edu.wpi.first.gradlerio.deploy.roborio.RoboRIO
+
+plugins {
+    id "java"
+    id "edu.wpi.first.GradleRIO" version "2026.2.1"
+    id 'checkstyle'
+    id 'jacoco'
+    id 'org.hidetake.ssh' version "2.9.0"
+    id 'io.freefair.aspectj.post-compile-weaving' version '8.13'
+}
+
+sourceCompatibility = JavaVersion.VERSION_17
+targetCompatibility = JavaVersion.VERSION_17
+
+// When in doubt, use the latest version from
+// https://dev.azure.com/Team488/Team%20488%20Builds/_artifacts/feed/XBot
+def SeriouslyCommonLibVersion = '20260713.2'
+
+def ROBOT_MAIN_CLASS = "competition.Main"
+
+// Define my targets (RoboRIO) and artifacts (deployable files)
+// This is added by GradleRIO's backing project DeployUtils.
+deploy {
+    targets {
+        roborio(getTargetTypeClass('RoboRIO')) {
+            // Team number is loaded either from the .wpilib/wpilib_preferences.json
+            // or from command line. If not found an exception will be thrown.
+            // You can use getTeamOrDefault(team) instead of getTeamNumber if you
+            // want to store a team number in this file.
+            team = project.frc.getTeamNumber()
+            debug = project.frc.getDebugOrDefault(false)
+
+            artifacts {
+                // First part is artifact name, 2nd is artifact type
+                // getTargetTypeClass is a shortcut to get the class type using a string
+
+                frcJava(getArtifactTypeClass('FRCJavaArtifact')) {
+                }
+
+                // Static files artifact
+                frcStaticFileDeploy(getArtifactTypeClass('FileTreeArtifact')) {
+                    files = project.fileTree('src/main/deploy')
+                    directory = '/home/lvuser/deploy'
+                    deleteOldFiles = true
+                }
+            }
+        }
+    }
+}
+
+def deployArtifact = deploy.targets.roborio.artifacts.frcJava
+
+// Set to true to use debug for JNI.
+wpi.java.debugJni = false
+
+// Set this to true to enable desktop support.
+def includeDesktopSupport = false
+
+// Maven central needed for JUnit
+repositories {
+    mavenCentral()
+
+    maven {
+        url "https://mvnrepository.com/artifact/com.google.dagger/dagger"
+        }
+
+    mavenLocal()
+
+    // Azure Artifacts feed for SeriouslyCommonLib
+    maven {
+        url "https://pkgs.dev.azure.com/Team488/2ef6eee3-1df0-441a-9af8-5edc5c3cb203/_packaging/2b1ba3b9-5dd7-47c4-ab96-d5c0a1d8af48/maven/v1"
+        name "AzureArtifacts"
+    }
+    maven { url "https://mvnrepository.com/artifact/com.google.dagger/dagger-compiler" }
+}
+
+configurations {
+    customAspectJ {
+        transitive = false
+    }
+}
+
+// Defining my dependencies. In this case, WPILib (+ friends), and vendor libraries.
+// Also defines JUnit 4.
+dependencies {
+    annotationProcessor wpi.java.deps.wpilibAnnotations()
+    implementation wpi.java.deps.wpilib()
+    implementation wpi.java.vendor.java()
+    customAspectJ wpi.java.deps.wpilib().findAll { dep -> dep.get().matches(/.*wpilibj-java.*/) }
+    customAspectJ wpi.java.vendor.java().findAll { dep -> dep.get().matches(/.*NewCommands.*/) }
+
+    roborioDebug wpi.java.deps.wpilibJniDebug(wpi.platforms.roborio)
+    roborioDebug wpi.java.vendor.jniDebug(wpi.platforms.roborio)
+
+    roborioRelease wpi.java.deps.wpilibJniRelease(wpi.platforms.roborio)
+    roborioRelease wpi.java.vendor.jniRelease(wpi.platforms.roborio)
+
+    nativeDebug wpi.java.deps.wpilibJniDebug(wpi.platforms.desktop)
+    nativeDebug wpi.java.vendor.jniDebug(wpi.platforms.desktop)
+    simulationDebug wpi.sim.enableDebug()
+
+    nativeRelease wpi.java.deps.wpilibJniRelease(wpi.platforms.desktop)
+    nativeRelease wpi.java.vendor.jniRelease(wpi.platforms.desktop)
+    simulationRelease wpi.sim.enableRelease()
+
+    implementation 'org.aspectj:aspectjrt:1.9.22'
+
+    testImplementation 'junit:junit:4.12'
+    testImplementation "org.mockito:mockito-core:3.12.4"
+
+    // SeriouslyCommonLib - automatically uses local build when available via composite build (see settings.gradle)
+    implementation group: 'xbot.common', name:'SeriouslyCommonLib', version: SeriouslyCommonLibVersion
+    customAspectJ group: 'xbot.common', name:'SeriouslyCommonLib', version: SeriouslyCommonLibVersion
+
+    implementation group: 'org.json', name:'json', version: '20220924'
+
+    implementation 'org.apache.logging.log4j:log4j-api:2.19.0'
+    implementation 'org.apache.logging.log4j:log4j-core:2.19.0'
+
+    implementation 'com.google.dagger:dagger:2.44.2'
+    annotationProcessor 'com.google.dagger:dagger-compiler:2.44.2'
+    testAnnotationProcessor 'com.google.dagger:dagger-compiler:2.44.2'
+
+    def akitJson = new groovy.json.JsonSlurper().parseText(new File(projectDir.getAbsolutePath() + "/vendordeps/AdvantageKit.json").text)
+    annotationProcessor "org.littletonrobotics.akit:akit-autolog:$akitJson.version"
+}
+
+// Uncomment the line below if you need to troubleshoot AspectJ weaving
+//compileJava.ajc.options.compilerArgs += "-showWeaveInfo"
+compileJava.ajc.options.inpath.from(configurations.customAspectJ)
+
+wpi.sim.addGui().defaultEnabled = true
+wpi.sim.addDriverstation()
+
+jar {
+    from {
+        configurations.runtimeClasspath.findAll({ p ->
+            !p.name.matches(/.*NewCommands.*/)
+                    && !p.name.matches(/.*SeriouslyCommonLib.*/)
+                    && !p.name.matches(/.*wpilibj-java.*/)
+        })
+                .collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    manifest edu.wpi.first.gradlerio.GradleRIOPlugin.javaManifest(ROBOT_MAIN_CLASS)
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+}
+
+// Configure jar and deploy tasks
+deployArtifact.jarTask = jar
+wpi.java.configureExecutableTasks(jar)
+wpi.java.configureTestTasks(test)
+
+// Configure string concat to always inline compile
+tasks.withType(JavaCompile) {
+    options.compilerArgs.add '-XDstringConcat=inline'
+}
+
+// Our custom gradle stuff after this line
+
+remotes {
+    rio {
+        host = 'roboRIO-488-frc.local'
+        user = 'admin'
+        knownHosts = allowAnyHosts
+    }
+}
+
+task('copyResources') {
+    doLast {
+        def localCommonLib = file('../SeriouslyCommonLib')
+        if (!localCommonLib.exists()) {
+            throw new GradleException("copyResources task requires local SeriouslyCommonLib. Clone it to ../SeriouslyCommonLib")
+        }
+        ssh.run {
+            session(remotes.rio) {
+                // execute 'mkdir ~/449_resources', ignoreError: true
+                // execute 'mkdir /488Logs', ignoreError: true
+                put from: fileTree('../SeriouslyCommonLib/lib/log4jConfig/log4j.xml'), into: '/home/lvuser/'
+                //execute ". /etc/profile.d/natinst-path.sh; /usr/local/frc/bin/frcKillRobot.sh -t -r", ignoreError: true
+            }
+        }
+    }
+}
+
+checkstyle {
+    toolVersion = '10.6.0'
+    configFile = file('config/checkstyle/checkstyle.xml')
+}
+
+// Configure basedir for all checkstyle tasks (main, test, and custom)
+tasks.withType(Checkstyle) {
+    configProperties.basedir = file('config/checkstyle')
+}
+
+task checkstyle(type: Checkstyle) {
+    source 'src/main/java'
+    configProperties.basedir = file('config/checkstyle')
+
+    // Empty classpath
+    classpath = files()
+}
+
+test {
+    reports {
+        junitXml.required = true
+    }               
+}
+
+// Configuration for AdvantageKit
+task(replayWatch, type: JavaExec) {
+    mainClass = "org.littletonrobotics.junction.ReplayWatch"
+    classpath = sourceSets.main.runtimeClasspath
+}
+
+// Configuration for Electrical Report
+task(electricalReport, type: JavaExec) {
+    mainClass = "electrical.report.Main"
+    classpath = sourceSets.main.runtimeClasspath
+}
+
+tasks.withType(Test) {
+    testLogging.showStandardStreams = true
+    
+    afterTest { desc, result -> 
+        logger.quiet "Executed test ${desc.name} [${desc.className}] with result: ${result.resultType}"
+    }
+
+    afterSuite { desc, result ->
+      if (!desc.parent) { // will match the outermost suite
+        logger.quiet "Results: ${result.resultType} (${result.testCount} tests, ${result.successfulTestCount} successes, ${result.failedTestCount} failures, ${result.skippedTestCount} skipped)"
+      }
+    }
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+    }
+}
+
+// always generate the coverage report after the tests run
+test.finalizedBy { jacocoTestReport }
